@@ -43,7 +43,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 let isProcessing = false;
 let currentBrowser = null;
 
-// Optimized Puppeteer setup for maximum speed and reliability
+// Optimized Puppeteer setup for maximum speed
 async function setupBrowser() {
   try {
     const browser = await puppeteer.launch({
@@ -69,10 +69,7 @@ async function setupBrowser() {
         '--disable-default-apps',
         '--fast-start',
         '--disable-web-security',
-        '--window-size=1920,1080',
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=VizDisplayCompositor'
+        '--window-size=1920,1080'
       ]
     });
     
@@ -84,96 +81,55 @@ async function setupBrowser() {
   }
 }
 
-// Ultra-fast service details fetcher with improved reliability
+// Ultra-fast service details fetcher
 async function fetchServiceDetails(page, circleCode, serviceNumber) {
   try {
-    // Set realistic user agent and hide automation
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-
-    // Navigate with shorter timeout and better error handling
     await page.goto('https://tgsouthernpower.org/getUkscno', {
-      waitUntil: 'domcontentloaded',
-      timeout: 15000
+      waitUntil: 'networkidle0',
+      timeout: 10000
     });
 
-    // Wait for input field with retry logic
-    let inputField;
-    for (let i = 0; i < 3; i++) {
-      try {
-        inputField = await page.waitForSelector('#ukscno', { timeout: 3000 });
-        break;
-      } catch (error) {
-        if (i === 2) throw error;
-        await page.waitForTimeout(1000);
-      }
+    // Wait for input field and enter data
+    await page.waitForSelector('#ukscno', { timeout: 5000 });
+    await page.type('#ukscno', `${circleCode} ${serviceNumber}`, { delay: 0 });
+
+    // Find and click submit button
+    const submitButton = await page.$x("//button[contains(text(), 'Submit') or contains(text(), 'SUBMIT')]");
+    if (submitButton.length > 0) {
+      await submitButton[0].click();
     }
 
-    // Clear and enter data with human-like typing
-    await inputField.click();
-    await inputField.evaluate(el => el.value = '');
-    await page.type('#ukscno', `${circleCode} ${serviceNumber}`, { delay: 50 });
+    // Wait for results
+    await page.waitForTimeout(800);
 
-    // Find and click submit button with retry
-    let submitButton;
-    for (let i = 0; i < 3; i++) {
-      try {
-        submitButton = await page.$x("//button[contains(text(), 'Submit') or contains(text(), 'SUBMIT')]");
-        if (submitButton.length > 0) {
-          await submitButton[0].click();
+    // Extract service details
+    const serviceDetails = await page.evaluate(() => {
+      const rows = document.querySelectorAll('table tr');
+      const details = {
+        serviceNo: '',
+        uniqueServiceNo: 'Not Found',
+        customerName: 'Not Found',
+        address: 'Not Found',
+        ero: 'Not Found',
+        mobile: 'Not Found',
+        status: 'Failed'
+      };
+
+      for (let row of rows) {
+        const cells = row.querySelectorAll('td');
+        if (cells.length >= 6) {
+          details.serviceNo = cells[0]?.textContent?.trim() || '';
+          details.uniqueServiceNo = cells[1]?.textContent?.trim() || 'Not Found';
+          details.customerName = cells[2]?.textContent?.trim() || 'Not Found';
+          details.address = cells[3]?.textContent?.trim() || 'Not Found';
+          details.ero = cells[4]?.textContent?.trim() || 'Not Found';
+          details.mobile = cells[5]?.textContent?.trim() || 'Not Found';
+          details.status = 'Success';
           break;
         }
-      } catch (error) {
-        if (i === 2) throw error;
-        await page.waitForTimeout(500);
       }
-    }
 
-    // Wait for results with shorter timeout
-    await page.waitForTimeout(1000);
-
-    // Extract service details with error handling
-    const serviceDetails = await page.evaluate(() => {
-      try {
-        const rows = document.querySelectorAll('table tr');
-        const details = {
-          serviceNo: '',
-          uniqueServiceNo: 'Not Found',
-          customerName: 'Not Found',
-          address: 'Not Found',
-          ero: 'Not Found',
-          mobile: 'Not Found',
-          status: 'Failed'
-        };
-
-        for (let row of rows) {
-          const cells = row.querySelectorAll('td');
-          if (cells.length >= 6) {
-            details.serviceNo = cells[0]?.textContent?.trim() || '';
-            details.uniqueServiceNo = cells[1]?.textContent?.trim() || 'Not Found';
-            details.customerName = cells[2]?.textContent?.trim() || 'Not Found';
-            details.address = cells[3]?.textContent?.trim() || 'Not Found';
-            details.ero = cells[4]?.textContent?.trim() || 'Not Found';
-            details.mobile = cells[5]?.textContent?.trim() || 'Not Found';
-            details.status = 'Success';
-            break;
-          }
-        }
-
-        return details;
-      } catch (error) {
-        return {
-          serviceNo: '',
-          uniqueServiceNo: 'Not Found',
-          customerName: 'Not Found',
-          address: 'Not Found',
-          ero: 'Not Found',
-          mobile: 'Not Found',
-          status: 'Failed'
-        };
-      }
+      return details;
     });
 
     return serviceDetails;
@@ -385,8 +341,8 @@ async function processCircleCode(circleCode, digitsInServiceCode) {
           logger.info(`Progress: ${processedCount}/${maxNumber + 1} (${successCount} found, ${savedCount} saved) for circle ${circleCode}`);
         }
 
-        // Small delay to avoid overwhelming the server and reduce errors
-        await page.waitForTimeout(200);
+        // Small delay to avoid overwhelming the server
+        await page.waitForTimeout(100);
 
       } catch (error) {
         logger.error(`Error processing ${circleCode} ${serviceNumber}:`, error);
