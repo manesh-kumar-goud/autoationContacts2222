@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: tgspdcl-automation
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+    healthCheckPath: /
+    autoDeploy: true
