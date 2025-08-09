@@ -47,7 +47,7 @@ let currentBrowser = null;
 async function setupBrowser() {
   try {
     const browser = await puppeteer.launch({
-      headless: true,
+      headless: "new",
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -58,8 +58,6 @@ async function setupBrowser() {
         '--disable-gpu',
         '--disable-extensions',
         '--disable-plugins',
-        '--disable-images',
-        '--disable-javascript',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
@@ -85,28 +83,87 @@ async function setupBrowser() {
 async function fetchServiceDetails(page, circleCode, serviceNumber) {
   try {
     await page.goto('https://tgsouthernpower.org/getUkscno', {
-      waitUntil: 'networkidle0',
-      timeout: 10000
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
     });
 
     // Wait for input field and enter data
-    await page.waitForSelector('#ukscno', { timeout: 5000 });
+    await page.waitForSelector('#ukscno', { timeout: 10000 });
     await page.type('#ukscno', `${circleCode} ${serviceNumber}`, { delay: 0 });
 
     // Find and click submit button
     const submitButton = await page.$x("//button[contains(text(), 'Submit') or contains(text(), 'SUBMIT')]");
+    const navOrResults = Promise.race([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
+      page.waitForFunction(() => {
+        const hasRows = document.querySelectorAll('table tr').length > 0;
+        const hasTable = document.querySelector('table') !== null;
+        const hasTds = document.querySelectorAll('td').length > 0;
+        return hasRows || hasTable || hasTds;
+      }, { timeout: 25000 }).catch(() => null)
+    ]);
     if (submitButton.length > 0) {
-      await submitButton[0].click();
+      await Promise.all([
+        submitButton[0].click(),
+        navOrResults
+      ]);
+    } else {
+      // Fallback: press Enter to submit the form
+      await Promise.all([
+        page.keyboard.press('Enter'),
+        navOrResults
+      ]);
     }
 
-    // Wait for results
-    await page.waitForTimeout(800);
+    // Wait briefly for any result signal; don't block too long per attempt
+    await page.waitForFunction(() => {
+      const hasRows = document.querySelectorAll('table tr').length > 0;
+      const hasTable = document.querySelector('table') !== null;
+      const hasTds = document.querySelectorAll('td').length > 0;
+      return hasRows || hasTable || hasTds;
+    }, { timeout: 8000 }).catch(() => null);
 
     // Extract service details
-    const serviceDetails = await page.evaluate(() => {
-      const rows = document.querySelectorAll('table tr');
-      const details = {
-        serviceNo: '',
+    let serviceDetails;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        serviceDetails = await page.evaluate(() => {
+          const rows = document.querySelectorAll('table tr');
+          const details = {
+            serviceNo: '',
+            uniqueServiceNo: 'Not Found',
+            customerName: 'Not Found',
+            address: 'Not Found',
+            ero: 'Not Found',
+            mobile: 'Not Found',
+            status: 'Failed'
+          };
+
+          for (let row of rows) {
+            const cells = row.querySelectorAll('td');
+            if (cells.length >= 6) {
+              details.serviceNo = cells[0]?.textContent?.trim() || '';
+              details.uniqueServiceNo = cells[1]?.textContent?.trim() || 'Not Found';
+              details.customerName = cells[2]?.textContent?.trim() || 'Not Found';
+              details.address = cells[3]?.textContent?.trim() || 'Not Found';
+              details.ero = cells[4]?.textContent?.trim() || 'Not Found';
+              details.mobile = cells[5]?.textContent?.trim() || 'Not Found';
+              details.status = 'Success';
+              break;
+            }
+          }
+
+          return details;
+        });
+        break;
+      } catch (err) {
+        // Retry once if the page navigated mid-evaluate
+        await page.waitForTimeout(500);
+      }
+    }
+    if (!serviceDetails) {
+      serviceDetails = {
+        serviceNo: `${circleCode} ${serviceNumber}`,
         uniqueServiceNo: 'Not Found',
         customerName: 'Not Found',
         address: 'Not Found',
@@ -114,23 +171,7 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
         mobile: 'Not Found',
         status: 'Failed'
       };
-
-      for (let row of rows) {
-        const cells = row.querySelectorAll('td');
-        if (cells.length >= 6) {
-          details.serviceNo = cells[0]?.textContent?.trim() || '';
-          details.uniqueServiceNo = cells[1]?.textContent?.trim() || 'Not Found';
-          details.customerName = cells[2]?.textContent?.trim() || 'Not Found';
-          details.address = cells[3]?.textContent?.trim() || 'Not Found';
-          details.ero = cells[4]?.textContent?.trim() || 'Not Found';
-          details.mobile = cells[5]?.textContent?.trim() || 'Not Found';
-          details.status = 'Success';
-          break;
-        }
-      }
-
-      return details;
-    });
+    }
 
     return serviceDetails;
   } catch (error) {
@@ -155,37 +196,144 @@ async function fetchBillAmount(page, ukscno) {
     }
 
     await page.goto('https://tgsouthernpower.org/getBillAmount', {
-      waitUntil: 'networkidle0',
-      timeout: 10000
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
     });
 
-    // Wait for input field and enter UKSCNO
-    await page.waitForSelector('#ukscno', { timeout: 5000 });
-    await page.type('#ukscno', ukscno, { delay: 0 });
+    // Try multiple input selectors; fall back if not found
+    const candidateSelectors = [
+      '#ukscno',
+      "input[name='ukscno']",
+      "input[id*='ukscno' i]",
+      "input[id*='uksc' i]",
+      "input[type='text']"
+    ];
+    let inputSelector = null;
+    for (const sel of candidateSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 3000 });
+        inputSelector = sel;
+        break;
+      } catch {}
+    }
+    if (inputSelector) {
+      await page.click(inputSelector, { clickCount: 3 }).catch(() => {});
+      await page.type(inputSelector, ukscno, { delay: 0 });
+    } else {
+      // If input not found, try direct navigation to billing page with query params
+      const directUrls = [
+        `https://tgsouthernpower.org/billinginfo?ukscno=${encodeURIComponent(ukscno)}`,
+        `https://tgsouthernpower.org/billinginfo?uniqueServiceNo=${encodeURIComponent(ukscno)}`
+      ];
+      for (const url of directUrls) {
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          break;
+        } catch {}
+      }
+    }
 
     // Find and click submit button
     const submitButton = await page.$x("//button[contains(text(), 'Submit') or contains(text(), 'SUBMIT')]");
-    if (submitButton.length > 0) {
-      await submitButton[0].click();
+    const navOrResults = Promise.race([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
+      page.waitForFunction(() => {
+        const hasRows = document.querySelectorAll('table tr').length > 0;
+        const hasTable = document.querySelector('table') !== null;
+        const hasTds = document.querySelectorAll('td').length > 0;
+        return hasRows || hasTable || hasTds || /billinginfo/i.test(location.href);
+      }, { timeout: 25000 }).catch(() => null)
+    ]);
+    if (inputSelector && submitButton.length > 0) {
+      await Promise.all([
+        submitButton[0].click(),
+        navOrResults
+      ]);
+    } else if (inputSelector) {
+      await Promise.all([
+        page.keyboard.press('Enter'),
+        navOrResults
+      ]);
     }
 
-    // Wait for results
-    await page.waitForTimeout(800);
+    // Ensure we are on billinginfo page; if not, navigate directly as a fallback
+    try {
+      await page.waitForFunction(() => /billinginfo/i.test(location.href), { timeout: 5000 });
+    } catch {}
+    if (!/billinginfo/i.test(page.url())) {
+      try {
+        await page.goto(`https://tgsouthernpower.org/billinginfo?ukscno=${encodeURIComponent(ukscno)}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        });
+      } catch {}
+    }
+
+    // Wait for any results signal briefly; also support known billinginfo page
+    await Promise.race([
+      page.waitForFunction(() => {
+        const hasRows = document.querySelectorAll('table tr').length > 0;
+        const hasTable = document.querySelector('table') !== null;
+        const hasTds = document.querySelectorAll('td').length > 0;
+        return hasRows || hasTable || hasTds;
+      }, { timeout: 8000 }).catch(() => null),
+      page.waitForFunction(() => /billinginfo/i.test(location.pathname) || /billinginfo/i.test(location.href), { timeout: 8000 }).catch(() => null)
+    ]);
+    // Best-effort wait for a visible table
+    await page.waitForSelector('table', { timeout: 4000 }).catch(() => null);
 
     // Extract bill amount
-    const billAmount = await page.evaluate(() => {
-      const rows = document.querySelectorAll('table tr');
-      for (let row of rows) {
-        const cells = row.querySelectorAll('td');
-        if (cells.length >= 2) {
-          const amount = cells[1]?.textContent?.trim();
-          if (amount && amount !== '') {
-            return amount;
-          }
-        }
+    let billAmount = 'Not Found';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        billAmount = await page.evaluate(() => {
+          const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+          const parseAmountText = (t) => {
+            const m = norm(t).match(/(₹|rs\.?\s*)?\s*([0-9][0-9,]*\.?[0-9]*)/i);
+            return m ? m[0].trim() : null;
+          };
+          const extractFromCells = (cells) => {
+            // Prefer the last td which usually holds the value under 'Amount'
+            for (let i = cells.length - 1; i >= 0; i--) {
+              const amt = parseAmountText(cells[i].textContent);
+              if (amt) return amt;
+            }
+            return null;
+          };
+          const findByLabel = (regex) => {
+            const rows = Array.from(document.querySelectorAll('table tr'));
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              const rowText = norm(row.textContent);
+              if (!regex.test(rowText)) continue;
+              // Try same row
+              let amt = extractFromCells(Array.from(row.querySelectorAll('td')));
+              if (amt) return amt;
+              // Try next 2 rows (often hold Date/Amount)
+              for (let j = 1; j <= 2 && i + j < rows.length; j++) {
+                amt = extractFromCells(Array.from(rows[i + j].querySelectorAll('td')));
+                if (amt) return amt;
+              }
+              break;
+            }
+            return null;
+          };
+
+          // 1) Strictly prefer Current Month Bill
+          let amt = findByLabel(/current\s*month\s*bill/i);
+          if (amt) return amt;
+          // 2) Fallback to Total Amount Payable
+          amt = findByLabel(/total\s*amount\s*payable/i);
+          if (amt) return amt;
+          // 3) Last resort: any visible ₹ on the page
+          const any = [...document.body.innerText.matchAll(/₹\s*[0-9][0-9,]*\.?[0-9]*/g)].map((m) => m[0].trim());
+          return any.length > 0 ? any[0] : 'Not Found';
+        });
+        break;
+      } catch (err) {
+        await page.waitForTimeout(500);
       }
-      return 'Not Found';
-    });
+    }
 
     return billAmount;
   } catch (error) {
@@ -197,6 +345,13 @@ async function fetchBillAmount(page, ukscno) {
 // Complete service processing
 async function processService(page, circleCode, serviceNumber) {
   try {
+    // Clear any previous input value if the site keeps the field
+    try {
+      await page.evaluate(() => {
+        const input = document.querySelector('#ukscno');
+        if (input) input.value = '';
+      });
+    } catch {}
     // Step 1: Get service details
     const serviceDetails = await fetchServiceDetails(page, circleCode, serviceNumber);
     
@@ -227,11 +382,15 @@ async function processService(page, circleCode, serviceNumber) {
   }
 }
 
-// Save data to Supabase - Only save successful results
+// Save data to Supabase - configurable to save only successes or all results
 async function saveToSupabase(data) {
   try {
-    // Only save if the service was found successfully
-    if (data.status === 'Success' && data.uniqueServiceNo !== 'Not Found') {
+    const SAVE_ONLY_SUCCESS = process.env.SAVE_ONLY_SUCCESS !== 'false';
+    const shouldSave = SAVE_ONLY_SUCCESS
+      ? (data.status === 'Success' && data.uniqueServiceNo !== 'Not Found')
+      : true;
+
+    if (shouldSave) {
       const { error } = await supabase
         .from('tgspdcl_automation_data')
         .insert([{
@@ -248,18 +407,18 @@ async function saveToSupabase(data) {
             service_number: data.serviceNo.split(' ')[1],
             processed_at: data.processedAt
           },
-          status: 'COMPLETED'
+          status: data.status === 'Success' ? 'COMPLETED' : 'FAILED'
         }]);
 
       if (error) {
         logger.error('Supabase insert error:', error);
         return false;
       }
-      logger.debug(`✅ Saved successful result for ${data.serviceNo}`);
+      logger.debug(`✅ Saved result for ${data.serviceNo} (Status: ${data.status})`);
       return true;
     } else {
       // Skip saving failed/invalid service numbers
-      logger.debug(`⏭️ Skipping invalid service: ${data.serviceNo} (Status: ${data.status})`);
+      logger.debug(`⏭️ Skipping save: ${data.serviceNo} (Status: ${data.status})`);
       return true; // Return true to continue processing
     }
   } catch (error) {
@@ -314,39 +473,80 @@ async function processCircleCode(circleCode, digitsInServiceCode) {
   
   const browser = await setupBrowser();
   const page = await browser.newPage();
+
+  // Page configuration for stability and speed
+  await page.setDefaultNavigationTimeout(30000);
+  await page.setDefaultTimeout(20000);
+  await page.setViewport({ width: 1280, height: 800 });
+  try { await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36'); } catch {}
+  try {
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font' || resourceType === 'media') {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+  } catch {}
   
   try {
     const maxNumber = Math.pow(10, digitsInServiceCode) - 1;
+    // Optional range limits for testing
+    const parsedStart = Number.parseInt(process.env.START_INDEX ?? '0', 10);
+    const parsedEnd = Number.parseInt(process.env.END_INDEX ?? String(maxNumber), 10);
+    let startIndex = Number.isFinite(parsedStart) ? parsedStart : 0;
+    let endIndex = Number.isFinite(parsedEnd) ? parsedEnd : maxNumber;
+    // Clamp to valid bounds
+    startIndex = Math.min(Math.max(0, startIndex), maxNumber);
+    endIndex = Math.min(Math.max(0, endIndex), maxNumber);
+
+    const startLabel = startIndex.toString().padStart(digitsInServiceCode, '0');
+    const endLabel = endIndex.toString().padStart(digitsInServiceCode, '0');
+    const maxLabel = maxNumber.toString().padStart(digitsInServiceCode, '0');
+    logger.info(`Processing range: ${startLabel} to ${endLabel} (of 0..${maxLabel})`);
     let processedCount = 0;
     let successCount = 0;
     let savedCount = 0;
 
-    for (let i = 0; i <= maxNumber; i++) {
-      const serviceNumber = i.toString().padStart(digitsInServiceCode, '0');
-      
-      try {
-        const result = await processService(page, circleCode, serviceNumber);
-        const saved = await saveToSupabase(result);
-        
-        processedCount++;
-        if (result.status === 'Success') {
-          successCount++;
+    const ascending = startIndex <= endIndex;
+    const totalToProcess = Math.abs(endIndex - startIndex) + 1;
+    if (ascending) {
+      for (let i = startIndex; i <= endIndex; i++) {
+        const serviceNumber = i.toString().padStart(digitsInServiceCode, '0');
+        try {
+          const result = await processService(page, circleCode, serviceNumber);
+          const saved = await saveToSupabase(result);
+          processedCount++;
+          if (result.status === 'Success') successCount++;
+          if (saved && result.status === 'Success') savedCount++;
+          if (processedCount % 50 === 0) {
+            logger.info(`Progress: ${processedCount}/${totalToProcess} (${successCount} found, ${savedCount} saved) for circle ${circleCode}`);
+          }
+          await page.waitForTimeout(150);
+        } catch (error) {
+          logger.error(`Error processing ${circleCode} ${serviceNumber}:`, error);
+          processedCount++;
         }
-        if (saved && result.status === 'Success') {
-          savedCount++;
+      }
+    } else {
+      for (let i = startIndex; i >= endIndex; i--) {
+        const serviceNumber = i.toString().padStart(digitsInServiceCode, '0');
+        try {
+          const result = await processService(page, circleCode, serviceNumber);
+          const saved = await saveToSupabase(result);
+          processedCount++;
+          if (result.status === 'Success') successCount++;
+          if (saved && result.status === 'Success') savedCount++;
+          if (processedCount % 50 === 0) {
+            logger.info(`Progress: ${processedCount}/${totalToProcess} (${successCount} found, ${savedCount} saved) for circle ${circleCode}`);
+          }
+          await page.waitForTimeout(150);
+        } catch (error) {
+          logger.error(`Error processing ${circleCode} ${serviceNumber}:`, error);
+          processedCount++;
         }
-
-        // Log progress every 50 services
-        if (processedCount % 50 === 0) {
-          logger.info(`Progress: ${processedCount}/${maxNumber + 1} (${successCount} found, ${savedCount} saved) for circle ${circleCode}`);
-        }
-
-        // Small delay to avoid overwhelming the server
-        await page.waitForTimeout(100);
-
-      } catch (error) {
-        logger.error(`Error processing ${circleCode} ${serviceNumber}:`, error);
-        processedCount++;
       }
     }
 

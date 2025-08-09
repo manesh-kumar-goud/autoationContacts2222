@@ -12,5 +12,7 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/.cache/puppeteer
     healthCheckPath: /
     autoDeploy: true
