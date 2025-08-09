@@ -24,7 +24,7 @@
     "express": "^4.19.2",
     "helmet": "^7.1.0",
     "node-cron": "^3.0.3",
-    "puppeteer": "^21.5.2",
+    "puppeteer": "^24.16.0",
     "winston": "^3.11.0"
   },
   "devDependencies": {
