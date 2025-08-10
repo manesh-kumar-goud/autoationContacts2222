@@ -5,9 +5,9 @@
   "main": "server_fixed.js",
   "type": "commonjs",
  "scripts": {
+  "postinstall": "npx puppeteer install",
   "start": "node server_fixed.js",
-  "dev": "nodemon server_fixed.js",
-  "postinstall": "puppeteer install"
+  "dev": "nodemon server_fixed.js"
 }
 ,
   "dependencies": {
