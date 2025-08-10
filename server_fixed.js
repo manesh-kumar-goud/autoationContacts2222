@@ -562,7 +562,7 @@ app.get('/', (req, res) => {
 });
 
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   logger.info(`Server listening on port ${PORT}`);
   logger.info('Automation backend ready');
 });
