@@ -4,10 +4,12 @@
   "description": "TGSPDCL automation backend with Puppeteer, Supabase, batching, and Render optimizations",
   "main": "server_fixed.js",
   "type": "commonjs",
-  "scripts": {
-    "start": "node server_fixed.js",
-    "dev": "nodemon server_fixed.js"
-  },
+ "scripts": {
+  "start": "node server_fixed.js",
+  "dev": "nodemon server_fixed.js",
+  "postinstall": "puppeteer install"
+}
+,
   "dependencies": {
     "@supabase/supabase-js": "^2.39.7",
     "compression": "^1.7.4",
