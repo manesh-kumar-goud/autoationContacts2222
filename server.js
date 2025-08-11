@@ -104,7 +104,7 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
     }
 }
 
-// **FINAL, CORRECTED FUNCTION** - Scraper for bill amount with your working logic and retries
+// **FINAL, CORRECTED FUNCTION** - Scraper for bill amount using YOUR proven logic + my retry system
 async function fetchBillAmount(page, ukscno) {
   if (!ukscno || ukscno === 'Not Found') {
     return 'Not Found';
@@ -121,7 +121,7 @@ async function fetchBillAmount(page, ukscno) {
         page.click('button[type="submit"]')
       ]);
       await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(() => {});
-      await page.waitForSelector('table tr:nth-child(2)', { timeout: 10000 }).catch(() => {});
+      await page.waitForSelector('table', { timeout: 10000 }).catch(() => {});
 
       // Using your superior, more flexible extraction logic
       const billAmount = await page.evaluate(() => {
@@ -142,7 +142,6 @@ async function fetchBillAmount(page, ukscno) {
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i];
               if (regex.test(norm(row.textContent))) {
-                // Check current row, then next two rows for amount
                 for (let j = 0; j <= 2 && i + j < rows.length; j++) {
                   let amt = extractFromCells(Array.from(rows[i + j].querySelectorAll('td')));
                   if (amt) return amt;
@@ -156,7 +155,6 @@ async function fetchBillAmount(page, ukscno) {
           let amt = findByLabel(/current\s*month\s*bill/i) || findByLabel(/total\s*amount\s*payable/i);
           if (amt) return amt;
           
-          // Last resort: find any currency symbol on the page
           const any = [...document.body.innerText.matchAll(/₹\s*[0-9][0-9,]*\.?[0-9]*/g)].map((m) => m[0].trim());
           return any.length > 0 ? any[0] : 'Not Found';
       });
@@ -172,14 +170,14 @@ async function fetchBillAmount(page, ukscno) {
     } catch (error) {
       logger.error(`Attempt ${attempt}/${MAX_RETRIES} failed for bill fetch ${ukscno}: ${error.message}`);
       if (attempt === MAX_RETRIES) {
-        return 'Not Found'; // Return after the last retry fails
+        return 'Not Found';
       }
     }
-    // Wait before the next retry
     await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
   }
   return 'Not Found';
 }
+
 
 // Orchestrates a single lookup
 async function processService(page, circleCode, serviceNumber) {
