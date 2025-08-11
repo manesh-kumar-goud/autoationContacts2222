@@ -104,80 +104,137 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
     }
 }
 
-// **FINAL, CORRECTED FUNCTION** - Scraper for bill amount using YOUR proven logic + my retry system
+// **REPLACED FUNCTION** - Using the proven logic you provided
 async function fetchBillAmount(page, ukscno) {
-  if (!ukscno || ukscno === 'Not Found') {
-    return 'Not Found';
-  }
+  try {
+    if (ukscno === 'Not Found') {
+      return 'Not Found';
+    }
 
-  const MAX_RETRIES = 3;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      await page.goto('https://tgsouthernpower.org/getBillAmount', { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await page.waitForSelector('#ukscno', { timeout: 20000 });
-      await page.type('#ukscno', ukscno, { delay: 20 });
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null),
-        page.click('button[type="submit"]')
-      ]);
-      await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(() => {});
-      await page.waitForSelector('table', { timeout: 10000 }).catch(() => {});
+    await page.goto('https://tgsouthernpower.org/getBillAmount', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
 
-      // Using your superior, more flexible extraction logic
-      const billAmount = await page.evaluate(() => {
-          const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-          const parseAmountText = (t) => {
-            const m = norm(t).match(/(₹|rs\.?\s*)?\s*([0-9][0-9,]*\.?[0-9]*)/i);
-            return m ? m[0].trim() : null;
-          };
-          const extractFromCells = (cells) => {
-            for (let i = cells.length - 1; i >= 0; i--) {
-              const amt = parseAmountText(cells[i].textContent);
-              if (amt) return amt;
-            }
-            return null;
-          };
-          const findByLabel = (regex) => {
-            const rows = Array.from(document.querySelectorAll('table tr'));
-            for (let i = 0; i < rows.length; i++) {
-              const row = rows[i];
-              if (regex.test(norm(row.textContent))) {
-                for (let j = 0; j <= 2 && i + j < rows.length; j++) {
-                  let amt = extractFromCells(Array.from(rows[i + j].querySelectorAll('td')));
-                  if (amt) return amt;
-                }
-                break;
-              }
-            }
-            return null;
-          };
-
-          let amt = findByLabel(/current\s*month\s*bill/i) || findByLabel(/total\s*amount\s*payable/i);
-          if (amt) return amt;
-          
-          const any = [...document.body.innerText.matchAll(/₹\s*[0-9][0-9,]*\.?[0-9]*/g)].map((m) => m[0].trim());
-          return any.length > 0 ? any[0] : 'Not Found';
-      });
-
-      if (billAmount && billAmount !== 'Not Found') {
-        return billAmount; // Success! Exit the retry loop.
-      }
-      if(attempt === MAX_RETRIES){
-        return 'Not Found'; // All retries failed
-      }
-      logger.warn(`Could not find bill for ${ukscno} on attempt ${attempt}. Retrying...`);
-
-    } catch (error) {
-      logger.error(`Attempt ${attempt}/${MAX_RETRIES} failed for bill fetch ${ukscno}: ${error.message}`);
-      if (attempt === MAX_RETRIES) {
-        return 'Not Found';
+    // Try multiple input selectors; fall back if not found
+    const candidateSelectors = [
+      '#ukscno',
+      "input[name='ukscno']",
+      "input[id*='ukscno' i]",
+      "input[id*='uksc' i]",
+      "input[type='text']"
+    ];
+    let inputSelector = null;
+    for (const sel of candidateSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 3000 });
+        inputSelector = sel;
+        break;
+      } catch {}
+    }
+    if (inputSelector) {
+      await page.click(inputSelector, { clickCount: 3 }).catch(() => {});
+      await page.type(inputSelector, ukscno, { delay: 0 });
+    } else {
+      // If input not found, try direct navigation to billing page with query params
+      const directUrls = [
+        `https://tgsouthernpower.org/billinginfo?ukscno=${encodeURIComponent(ukscno)}`,
+        `https://tgsouthernpower.org/billinginfo?uniqueServiceNo=${encodeURIComponent(ukscno)}`
+      ];
+      for (const url of directUrls) {
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          break;
+        } catch {}
       }
     }
-    await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
-  }
-  return 'Not Found';
-}
 
+    // Find and click submit button
+    const submitButton = await page.$x("//button[contains(text(), 'Submit') or contains(text(), 'SUBMIT')]");
+    const navOrResults = Promise.race([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
+      page.waitForFunction(() => {
+        const hasRows = document.querySelectorAll('table tr').length > 0;
+        const hasTable = document.querySelector('table') !== null;
+        const hasTds = document.querySelectorAll('td').length > 0;
+        return hasRows || hasTable || hasTds || /billinginfo/i.test(location.href);
+      }, { timeout: 25000 }).catch(() => null)
+    ]);
+    if (inputSelector && submitButton.length > 0) {
+      await Promise.all([
+        submitButton[0].click(),
+        navOrResults
+      ]);
+    } else if (inputSelector) {
+      await Promise.all([
+        page.keyboard.press('Enter'),
+        navOrResults
+      ]);
+    }
+
+    // Ensure we are on billinginfo page; if not, navigate directly as a fallback
+    try {
+      await page.waitForFunction(() => /billinginfo/i.test(location.href), { timeout: 5000 });
+    } catch {}
+    if (!/billinginfo/i.test(page.url())) {
+      try {
+        await page.goto(`https://tgsouthernpower.org/billinginfo?ukscno=${encodeURIComponent(ukscno)}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        });
+      } catch {}
+    }
+    
+    await page.waitForSelector('table', { timeout: 4000 }).catch(() => null);
+
+    // Extract bill amount
+    let billAmount = 'Not Found';
+    billAmount = await page.evaluate(() => {
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const parseAmountText = (t) => {
+          const m = norm(t).match(/(₹|rs\.?\s*)?\s*([0-9][0-9,]*\.?[0-9]*)/i);
+          return m ? m[0].trim() : null;
+        };
+        const extractFromCells = (cells) => {
+          for (let i = cells.length - 1; i >= 0; i--) {
+            const amt = parseAmountText(cells[i].textContent);
+            if (amt) return amt;
+          }
+          return null;
+        };
+        const findByLabel = (regex) => {
+          const rows = Array.from(document.querySelectorAll('table tr'));
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const rowText = norm(row.textContent);
+            if (!regex.test(rowText)) continue;
+            // Try same row, then next 2 rows
+            for (let j = 0; j <= 2 && i + j < rows.length; j++) {
+                let amt = extractFromCells(Array.from(rows[i + j].querySelectorAll('td')));
+                if (amt) return amt;
+            }
+            break;
+          }
+          return null;
+        };
+
+        // 1) Strictly prefer Current Month Bill
+        let amt = findByLabel(/current\s*month\s*bill/i);
+        if (amt) return amt;
+        // 2) Fallback to Total Amount Payable
+        amt = findByLabel(/total\s*amount\s*payable/i);
+        if (amt) return amt;
+        // 3) Last resort: any visible ₹ on the page
+        const any = [...document.body.innerText.matchAll(/₹\s*[0-9][0-9,]*\.?[0-9]*/g)].map((m) => m[0].trim());
+        return any.length > 0 ? any[0] : 'Not Found';
+      });
+
+    return billAmount;
+  } catch (error) {
+    logger.error(`Error fetching bill amount for UKSCNO ${ukscno}:`, error);
+    return 'Not Found';
+  }
+}
 
 // Orchestrates a single lookup
 async function processService(page, circleCode, serviceNumber) {
@@ -304,18 +361,18 @@ async function runAutomation() {
             if (nextTask) {
                 isProcessing = true;
                 logger.info(`New task found: Circle ${nextTask.circle_code}. Starting processing.`);
-                await processCircleCode(nextTask, browser); // Pass the existing browser
+                await processCircleCode(nextTask, browser);
                 isProcessing = false;
                 logger.info(`Task for circle ${nextTask.circle_code} finished. Resuming monitoring.`);
             } else {
                 logger.info('No pending tasks found. Waiting for 1 minute before checking again.');
-                await new Promise(resolve => setTimeout(resolve, 60000)); // 1 minute delay
+                await new Promise(resolve => setTimeout(resolve, 60000));
             }
         }
     } catch (error) {
         logger.error(`A critical error occurred in the automation cycle: ${error.message}`);
     } finally {
-        if (browser) await browser.close(); // Close the single browser on exit
+        if (browser) await browser.close();
         logger.info('Automation engine shutting down.');
     }
 }
@@ -328,5 +385,5 @@ app.get('/status', (req, res) => res.json({ isProcessing }));
 // Start server and initial automation run
 app.listen(process.env.PORT || 3000, () => {
   logger.info(`Server running on port ${process.env.PORT || 3000}`);
-  runAutomation(); // Kick off the continuous monitoring loop
+  runAutomation();
 });
