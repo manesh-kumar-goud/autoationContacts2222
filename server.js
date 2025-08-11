@@ -50,31 +50,19 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // Global variables
 let isProcessing = false;
 
-// Optimized Puppeteer setup for maximum speed and stealth
+// Optimized Puppeteer setup
 async function setupBrowser() {
   try {
     const browser = await puppeteer.launch({
-      headless: "new", // IMPORTANT: Change to 'false' for local debugging
+      headless: "new",
       args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--disable-infobars',
-        '--window-position=0,0',
-        '--ignore-certifcate-errors',
-        '--ignore-certifcate-errors-spki-list',
-        '--disable-extensions',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--window-size=1920,1080'
+        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
+        '--disable-gpu', '--disable-infobars', '--window-position=0,0',
+        '--ignore-certifcate-errors', '--ignore-certifcate-errors-spki-list',
+        '--disable-extensions', '--window-size=1920,1080'
       ]
     });
-    
     logger.info('Browser setup completed');
     return browser;
   } catch (error) {
@@ -83,29 +71,17 @@ async function setupBrowser() {
   }
 }
 
-// Ultra-fast service details fetcher
+// Service details fetcher
 async function fetchServiceDetails(page, circleCode, serviceNumber) {
   try {
-    await page.goto('https://tgsouthernpower.org/getUkscno', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
-
+    await page.goto('https://tgsouthernpower.org/getUkscno', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForSelector('#ukscno', { timeout: 10000 });
     await page.type('#ukscno', `${circleCode} ${serviceNumber}`, { delay: 0 });
 
-    const submitButton = await page.$x("//button[contains(text(), 'Submit') or contains(text(), 'SUBMIT')]");
-    if (submitButton.length > 0) {
-      await Promise.all([
+    await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
-        submitButton[0].click()
-      ]);
-    } else {
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
-        page.keyboard.press('Enter')
-      ]);
-    }
+        page.click('button[type="submit"]')
+    ]);
 
     await page.waitForSelector('table', { timeout: 8000 }).catch(() => null);
 
@@ -115,7 +91,7 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
         serviceNo: 'Not Found', uniqueServiceNo: 'Not Found', customerName: 'Not Found',
         address: 'Not Found', ero: 'Not Found', mobile: 'Not Found', status: 'Failed'
       };
-      for (let row of rows) {
+      for (const row of rows) {
         const cells = row.querySelectorAll('td');
         if (cells.length >= 6) {
           details.serviceNo = cells[0]?.textContent?.trim() || '';
@@ -131,12 +107,10 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
       return details;
     });
 
-    if(serviceDetails.status !== 'Success'){
+    if (serviceDetails.status !== 'Success') {
         serviceDetails.serviceNo = `${circleCode} ${serviceNumber}`;
     }
-
     return serviceDetails;
-
   } catch (error) {
     logger.error(`Error fetching service details for ${circleCode} ${serviceNumber}: ${error.message}`);
     return {
@@ -146,46 +120,31 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
   }
 }
 
-// More reliable bill amount fetcher
+// Bill amount fetcher
 async function fetchBillAmount(page, ukscno) {
   try {
-    if (ukscno === 'Not Found' || !ukscno) {
-      return 'Not Found';
-    }
+    if (ukscno === 'Not Found' || !ukscno) return 'Not Found';
 
-    // STEP 1: Go to the form page
-    await page.goto('https://tgsouthernpower.org/getBillAmount', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
-
-    // STEP 2: Type in the UKSCNO and submit the form
+    await page.goto('https://tgsouthernpower.org/getBillAmount', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForSelector('#ukscno', { timeout: 10000 });
-    await page.type('#ukscno', ukscno, { delay: 20 }); // Small delay to mimic typing
-
+    await page.type('#ukscno', ukscno, { delay: 20 });
     await Promise.all([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
       page.click('button[type="submit"]')
     ]);
 
-    // STEP 3: Wait for the results table to appear on the new page
-    await page.waitForSelector('table', { timeout: 8000 }).catch(() => {
-        logger.warn(`Warning: Table not found for UKSCNO ${ukscno} after submission.`);
-    });
+    await page.waitForSelector('table', { timeout: 8000 }).catch(() => logger.warn(`Table not found for UKSCNO ${ukscno}`));
 
-    // STEP 4: Extract the bill amount from the table
     const billAmount = await page.evaluate(() => {
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const rows = Array.from(document.querySelectorAll('table tr'));
       for (const row of rows) {
         const cells = row.querySelectorAll('td, th');
         if (cells.length > 1) {
-            // Check if a label exists in any cell but the last one
             for (let i = 0; i < cells.length - 1; i++) {
                 const labelText = norm(cells[i].textContent);
                 if (labelText.includes('current month bill') || labelText.includes('total amount payable')) {
                     const amountText = cells[cells.length - 1].textContent.trim();
-                    // Check if the amount cell contains a plausible value
                     if (amountText && amountText.match(/([0-9,]+\.?[0-9]*)/)) {
                         return amountText;
                     }
@@ -193,14 +152,12 @@ async function fetchBillAmount(page, ukscno) {
             }
         }
       }
-      return 'Not Found'; // Return 'Not Found' if no matching row is found
+      return 'Not Found';
     });
-
     return billAmount || 'Not Found';
-
   } catch (error) {
     logger.error(`Error fetching bill for UKSCNO ${ukscno}: ${error.message}`);
-    return 'Not Found'; // Return 'Not Found' on any error
+    return 'Not Found';
   }
 }
 
@@ -226,48 +183,49 @@ async function processService(page, circleCode, serviceNumber) {
 // Save data to Supabase
 async function saveToSupabase(data) {
   try {
-    const SAVE_ONLY_SUCCESS = process.env.SAVE_ONLY_SUCCESS !== 'false';
-    const shouldSave = SAVE_ONLY_SUCCESS ? (data.status === 'Success') : true;
-
-    if (shouldSave) {
-      const { error } = await supabase.from('tgspdcl_automation_data').insert([
-        {
-          service_no: data.serviceNo, unique_service_no: data.uniqueServiceNo,
-          customer_name: data.customerName, address: data.address,
-          ero: data.ero, mobile: data.mobile, bill_amount: data.billAmount,
-          fetch_status: data.status,
-          search_info: {
-            circle_code: data.serviceNo.split(' ')[0],
-            service_number: data.serviceNo.split(' ')[1],
-            processed_at: data.processedAt
-          },
-          status: 'COMPLETED'
-        }
-      ]);
-      if (error) {
-        logger.error(`Supabase insert error: ${error.message}`);
-        return false;
-      }
-      return true;
-    } else {
+    if (process.env.SAVE_ONLY_SUCCESS === 'true' && data.status !== 'Success') {
       logger.debug(`Skipping save for failed scrape: ${data.serviceNo}`);
       return true;
     }
+
+    const { error } = await supabase.from('tgspdcl_automation_data').insert([{
+      service_no: data.serviceNo, unique_service_no: data.uniqueServiceNo,
+      customer_name: data.customerName, address: data.address,
+      ero: data.ero, mobile: data.mobile, bill_amount: data.billAmount,
+      fetch_status: data.status,
+      search_info: {
+        circle_code: data.serviceNo.split(' ')[0],
+        service_number: data.serviceNo.split(' ')[1],
+        processed_at: data.processedAt
+      },
+      status: 'COMPLETED'
+    }]);
+    if (error) {
+        logger.error(`Supabase insert error: ${error.message}`);
+        return false;
+    }
+    return true;
   } catch (error) {
     logger.error(`Error saving to Supabase: ${error.message}`);
     return false;
   }
 }
 
-// Get pending circle codes from Supabase
-async function getPendingCircleCodes() {
+// Get the next pending circle code
+async function getNextPendingTask() {
   try {
-    const { data, error } = await supabase.from('circle_codes').select('*').eq('status', 'PENDING').order('id', { ascending: true });
+    const { data, error } = await supabase
+      .from('circle_codes')
+      .select('*')
+      .eq('status', 'PENDING')
+      .order('id', { ascending: true })
+      .limit(1);
+
     if (error) throw error;
-    return data || [];
+    return data && data.length > 0 ? data[0] : null;
   } catch (error) {
-    logger.error(`Error fetching pending circle codes: ${error.message}`);
-    return [];
+    logger.error(`Error fetching next pending task: ${error.message}`);
+    return null;
   }
 }
 
@@ -278,117 +236,102 @@ async function updateCircleCodeStatus(id, status) {
     if (error) throw error;
     return true;
   } catch (error) {
-    logger.error(`Error updating circle code status for ${id}: ${error.message}`);
+    logger.error(`Error updating circle status for ${id}: ${error.message}`);
     return false;
   }
 }
 
-// Main processing function
-async function processCircleCode(circleCode, digitsInServiceCode) {
-  logger.info(`Starting processing for circle code: ${circleCode} with ${digitsInServiceCode} digits`);
-  
-  const browser = await setupBrowser();
+// Main processing function for a single circle code
+async function processCircleCode(circle, browser) {
+  const { circle_code, digits_in_service_code, id } = circle;
+  logger.info(`Starting processing for circle code: ${circle_code} with ${digits_in_service_code} digits`);
   
   try {
-    const maxNumber = Math.pow(10, digitsInServiceCode) - 1;
+    await updateCircleCodeStatus(id, 'PROCESSING');
+    
+    const maxNumber = Math.pow(10, digits_in_service_code) - 1;
     let startIndex = Number.parseInt(process.env.START_INDEX ?? '0', 10);
     let endIndex = Number.parseInt(process.env.END_INDEX ?? String(maxNumber), 10);
     startIndex = Math.max(0, startIndex);
     endIndex = Math.min(endIndex, maxNumber);
 
-    logger.info(`Processing range: ${String(startIndex).padStart(digitsInServiceCode, '0')} to ${String(endIndex).padStart(digitsInServiceCode, '0')}`);
+    logger.info(`Processing range: ${String(startIndex).padStart(digits_in_service_code, '0')} to ${String(endIndex).padStart(digits_in_service_code, '0')}`);
     
     let processedCount = 0, successCount = 0, savedCount = 0;
     const totalToProcess = Math.abs(endIndex - startIndex) + 1;
     
     for (let i = startIndex; i <= endIndex; i++) {
-      const serviceNumber = i.toString().padStart(digitsInServiceCode, '0');
+      const serviceNumber = i.toString().padStart(digits_in_service_code, '0');
       let page = null;
 
       try {
         page = await browser.newPage();
-        
-        await page.setDefaultNavigationTimeout(45000); // Increased timeout
+        await page.setDefaultNavigationTimeout(45000);
         await page.setViewport({ width: 1920, height: 1080 });
-
-        const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
-        await page.setUserAgent(randomUA);
+        await page.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)]);
         
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-          if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-            req.abort();
-          } else {
-            req.continue();
-          }
+          ['image', 'stylesheet', 'font', 'media'].includes(req.resourceType()) ? req.abort() : req.continue();
         });
         
-        const result = await processService(page, circleCode, serviceNumber);
+        const result = await processService(page, circle_code, serviceNumber);
         const saved = await saveToSupabase(result);
         
         processedCount++;
         if (result.status === 'Success') successCount++;
         if (saved && result.status === 'Success') savedCount++;
 
-        if (processedCount % 10 === 0) { // More frequent progress logging
-          logger.info(`Progress: ${processedCount}/${totalToProcess} (${successCount} found, ${savedCount} saved) for circle ${circleCode}`);
+        if (processedCount % 10 === 0) {
+          logger.info(`Progress: ${processedCount}/${totalToProcess} (${successCount} found) for circle ${circle_code}`);
         }
         
       } catch (error) {
-        logger.error(`Critical error in loop for ${circleCode} ${serviceNumber}: ${error.message}`);
+        logger.error(`Critical error in loop for ${circle_code} ${serviceNumber}: ${error.message}`);
         processedCount++;
       } finally {
         if (page) await page.close();
-        
-        // LONGER, MORE RANDOMIZED DELAY
-        const delay = 1000 + Math.floor(Math.random() * 1500); // Wait 1 to 2.5 seconds
+        const delay = 1000 + Math.floor(Math.random() * 1500);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
 
-    logger.info(`✅ Completed circle ${circleCode}: ${processedCount} processed, ${successCount} found, ${savedCount} saved`);
-    return { processedCount, successCount, savedCount };
-
+    logger.info(`✅ Completed circle ${circle_code}: ${processedCount} processed, ${successCount} found`);
+    await updateCircleCodeStatus(id, 'COMPLETED');
   } catch (error) {
-    logger.error(`Fatal error in processCircleCode for ${circleCode}: ${error.message}`);
+    logger.error(`Fatal error processing circle ${circle_code}: ${error.message}`);
+    await updateCircleCodeStatus(id, 'FAILED');
     throw error;
-  } finally {
-    if (browser) await browser.close();
   }
 }
 
-// Main automation function
+// Main automation function with a continuous loop
 async function runAutomation() {
   if (isProcessing) {
-    logger.info('Automation already running, skipping...');
+    logger.info('Automation cycle is already running. Skipping trigger.');
     return;
   }
   isProcessing = true;
-  logger.info('Starting automation process...');
+  logger.info('Starting automation cycle...');
 
+  const browser = await setupBrowser();
+  
   try {
-    const pendingCircleCodes = await getPendingCircleCodes();
-    if (pendingCircleCodes.length === 0) {
-      logger.info('No pending tasks found. Waiting...');
-      return;
-    }
-
-    logger.info(`Found ${pendingCircleCodes.length} pending circle codes.`);
-    for (const circle of pendingCircleCodes) {
-      try {
-        logger.info(`🔄 Starting processing for circle ${circle.circle_code}`);
-        await updateCircleCodeStatus(circle.id, 'PROCESSING');
-        await processCircleCode(circle.circle_code, circle.digits_in_service_code);
-        await updateCircleCodeStatus(circle.id, 'COMPLETED');
-        logger.info(`✅ Circle ${circle.circle_code} completed.`);
-      } catch (error) {
-        logger.error(`❌ Error processing circle ${circle.circle_code}: ${error.message}`);
-        await updateCircleCodeStatus(circle.id, 'FAILED');
+    while (true) {
+      const nextTask = await getNextPendingTask();
+      
+      if (nextTask) {
+        logger.info(`Found pending task: Circle ${nextTask.circle_code}`);
+        await processCircleCode(nextTask, browser);
+      } else {
+        logger.info('No more pending tasks found. Automation will now idle.');
+        break; // Exit the while loop
       }
     }
   } catch (error) {
-    logger.error(`Error in main automation function: ${error.message}`);
+    logger.error(`A critical error occurred in the automation cycle: ${error.message}`);
   } finally {
+    if (browser) await browser.close();
     isProcessing = false;
     logger.info('Automation cycle finished.');
   }
@@ -397,17 +340,15 @@ async function runAutomation() {
 // API Routes
 app.get('/', (req, res) => res.json({ message: 'Automation Backend', status: 'running', isProcessing }));
 app.post('/start', (req, res) => {
-  if (isProcessing) return res.status(409).json({ success: false, message: 'Automation already in progress.' });
+  if (isProcessing) {
+    return res.status(409).json({ success: false, message: 'Automation is already in progress.' });
+  }
+  // Run in background and immediately respond
   runAutomation();
-  res.json({ success: true, message: 'Automation triggered.' });
+  res.json({ success: true, message: 'Automation cycle triggered.' });
 });
 app.get('/status', (req, res) => res.json({ isProcessing }));
 
-// Cron jobs
-cron.schedule('*/5 * * * *', () => {
-  logger.info('Cron job: Checking for new pending tasks...');
-  runAutomation();
-});
 
 // Start server
 app.listen(process.env.PORT || 3000, () => {
