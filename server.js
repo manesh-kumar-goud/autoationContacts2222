@@ -534,7 +534,7 @@ async function processCircleCode(circleCode, digitsInServiceCode) {
         if (result.status === 'Success') successCount++;
         if (saved && result.status === 'Success') savedCount++;
 
-        if (processedCount % 50 === 0) {
+        if (processedCount % 10 === 0) {
           logger.info(`Progress: ${processedCount}/${totalToProcess} (${successCount} found, ${savedCount} saved) for circle ${circleCode}`);
         }
         
