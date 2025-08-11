@@ -63,8 +63,8 @@ async function setupBrowser() {
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
-        '--disable-infobars', // Added for stealth
-        '--window-position=0,0', // Added for consistency
+        '--disable-infobars',
+        '--window-position=0,0',
         '--ignore-certifcate-errors',
         '--ignore-certifcate-errors-spki-list',
         '--disable-extensions',
@@ -146,41 +146,61 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
   }
 }
 
-// Ultra-fast bill amount fetcher
+// More reliable bill amount fetcher
 async function fetchBillAmount(page, ukscno) {
   try {
-    if (ukscno === 'Not Found') return 'Not Found';
+    if (ukscno === 'Not Found' || !ukscno) {
+      return 'Not Found';
+    }
 
-    await page.goto(`https://tgsouthernpower.org/billinginfo?ukscno=${encodeURIComponent(ukscno)}`, {
+    // STEP 1: Go to the form page
+    await page.goto('https://tgsouthernpower.org/getBillAmount', {
       waitUntil: 'domcontentloaded',
       timeout: 30000
     });
-    
-    await page.waitForSelector('table', { timeout: 8000 }).catch(() => {});
 
+    // STEP 2: Type in the UKSCNO and submit the form
+    await page.waitForSelector('#ukscno', { timeout: 10000 });
+    await page.type('#ukscno', ukscno, { delay: 20 }); // Small delay to mimic typing
+
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
+      page.click('button[type="submit"]')
+    ]);
+
+    // STEP 3: Wait for the results table to appear on the new page
+    await page.waitForSelector('table', { timeout: 8000 }).catch(() => {
+        logger.warn(`Warning: Table not found for UKSCNO ${ukscno} after submission.`);
+    });
+
+    // STEP 4: Extract the bill amount from the table
     const billAmount = await page.evaluate(() => {
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const rows = Array.from(document.querySelectorAll('table tr'));
       for (const row of rows) {
-        const rowText = norm(row.textContent);
-        if (rowText.includes('current month bill') || rowText.includes('total amount payable')) {
-          const cells = row.querySelectorAll('td');
-          if (cells.length > 1) {
-            const amountText = cells[cells.length - 1].textContent.trim();
-            if (amountText.match(/₹|rs/i) || !isNaN(parseFloat(amountText))) {
-              return amountText;
+        const cells = row.querySelectorAll('td, th');
+        if (cells.length > 1) {
+            // Check if a label exists in any cell but the last one
+            for (let i = 0; i < cells.length - 1; i++) {
+                const labelText = norm(cells[i].textContent);
+                if (labelText.includes('current month bill') || labelText.includes('total amount payable')) {
+                    const amountText = cells[cells.length - 1].textContent.trim();
+                    // Check if the amount cell contains a plausible value
+                    if (amountText && amountText.match(/([0-9,]+\.?[0-9]*)/)) {
+                        return amountText;
+                    }
+                }
             }
-          }
         }
       }
-      return 'Not Found';
+      return 'Not Found'; // Return 'Not Found' if no matching row is found
     });
 
     return billAmount || 'Not Found';
 
   } catch (error) {
     logger.error(`Error fetching bill for UKSCNO ${ukscno}: ${error.message}`);
-    return 'Not Found';
+    return 'Not Found'; // Return 'Not Found' on any error
   }
 }
 
@@ -320,7 +340,7 @@ async function processCircleCode(circleCode, digitsInServiceCode) {
       } finally {
         if (page) await page.close();
         
-        // **LONGER, MORE RANDOMIZED DELAY**
+        // LONGER, MORE RANDOMIZED DELAY
         const delay = 1000 + Math.floor(Math.random() * 1500); // Wait 1 to 2.5 seconds
         await new Promise(resolve => setTimeout(resolve, delay));
       }
