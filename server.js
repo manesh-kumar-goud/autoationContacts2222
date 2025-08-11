@@ -1,7 +1,6 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
-const cron = require('node-cron');
 const winston = require('winston');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -20,47 +19,40 @@ const userAgents = [
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Security middleware
+// Middleware
 app.use(helmet());
 app.use(compression());
 app.use(cors());
 app.use(express.json());
 
-// Configure logging
+// Logger
 const logger = winston.createLogger({
   level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
+  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
   transports: [
     new winston.transports.File({ filename: 'error.log', level: 'error' }),
     new winston.transports.File({ filename: 'combined.log' }),
-    new winston.transports.Console({
-      format: winston.format.simple()
-    })
+    new winston.transports.Console({ format: winston.format.simple() })
   ]
 });
 
-// Initialize Supabase
+// Supabase Client
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Global variables
+// Global State
 let isProcessing = false;
 
-// Optimized Puppeteer setup
+// Puppeteer setup
 async function setupBrowser() {
   try {
     const browser = await puppeteer.launch({
       headless: "new",
       args: [
         '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
-        '--disable-gpu', '--disable-infobars', '--window-position=0,0',
-        '--ignore-certifcate-errors', '--ignore-certifcate-errors-spki-list',
-        '--disable-extensions', '--window-size=1920,1080'
+        '--disable-gpu', '--disable-infobars', '--window-size=1920,1080',
+        '--no-zygote', '--single-process' // Flags for stability in server environments
       ]
     });
     logger.info('Browser setup completed');
@@ -71,165 +63,128 @@ async function setupBrowser() {
   }
 }
 
-// Service details fetcher
+// Scraper for service details
 async function fetchServiceDetails(page, circleCode, serviceNumber) {
-  try {
-    await page.goto('https://tgsouthernpower.org/getUkscno', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForSelector('#ukscno', { timeout: 10000 });
-    await page.type('#ukscno', `${circleCode} ${serviceNumber}`, { delay: 0 });
+    try {
+        await page.goto('https://tgsouthernpower.org/getUkscno', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForSelector('#ukscno', { timeout: 15000 });
+        await page.type('#ukscno', `${circleCode} ${serviceNumber}`, { delay: 0 });
+        await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
+            page.click('button[type="submit"]')
+        ]);
+        await page.waitForSelector('table', { timeout: 10000 }).catch(() => null);
 
-    await Promise.all([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
-        page.click('button[type="submit"]')
-    ]);
-
-    await page.waitForSelector('table', { timeout: 8000 }).catch(() => null);
-
-    const serviceDetails = await page.evaluate(() => {
-      const rows = document.querySelectorAll('table tr');
-      const details = {
-        serviceNo: 'Not Found', uniqueServiceNo: 'Not Found', customerName: 'Not Found',
-        address: 'Not Found', ero: 'Not Found', mobile: 'Not Found', status: 'Failed'
-      };
-      for (const row of rows) {
-        const cells = row.querySelectorAll('td');
-        if (cells.length >= 6) {
-          details.serviceNo = cells[0]?.textContent?.trim() || '';
-          details.uniqueServiceNo = cells[1]?.textContent?.trim() || 'Not Found';
-          details.customerName = cells[2]?.textContent?.trim() || 'Not Found';
-          details.address = cells[3]?.textContent?.trim() || 'Not Found';
-          details.ero = cells[4]?.textContent?.trim() || 'Not Found';
-          details.mobile = cells[5]?.textContent?.trim() || 'Not Found';
-          details.status = 'Success';
-          break;
+        const serviceDetails = await page.evaluate((cCode, sNum) => {
+            const rows = document.querySelectorAll('table tr');
+            for (const row of rows) {
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 6) {
+                    return {
+                        serviceNo: cells[0]?.textContent?.trim() || `${cCode} ${sNum}`,
+                        uniqueServiceNo: cells[1]?.textContent?.trim() || 'Not Found',
+                        customerName: cells[2]?.textContent?.trim() || 'Not Found',
+                        address: cells[3]?.textContent?.trim() || 'Not Found',
+                        ero: cells[4]?.textContent?.trim() || 'Not Found',
+                        mobile: cells[5]?.textContent?.trim() || 'Not Found',
+                        status: 'Success'
+                    };
+                }
+            }
+            return { status: 'Failed' };
+        }, circleCode, serviceNumber);
+        
+        if (serviceDetails.status !== 'Success') {
+            serviceDetails.serviceNo = `${circleCode} ${serviceNumber}`;
         }
-      }
-      return details;
-    });
-
-    if (serviceDetails.status !== 'Success') {
-        serviceDetails.serviceNo = `${circleCode} ${serviceNumber}`;
+        return serviceDetails;
+    } catch (error) {
+        // Don't log timeout errors as huge stack traces, just the message
+        logger.error(`Fetch Details Error for ${circleCode}-${serviceNumber}: ${error.message}`);
+        return { serviceNo: `${circleCode} ${serviceNumber}`, status: 'Failed' };
     }
-    return serviceDetails;
-  } catch (error) {
-    logger.error(`Error fetching service details for ${circleCode} ${serviceNumber}: ${error.message}`);
-    return {
-      serviceNo: `${circleCode} ${serviceNumber}`, uniqueServiceNo: 'Not Found', customerName: 'Not Found',
-      address: 'Not Found', ero: 'Not Found', mobile: 'Not Found', status: 'Failed'
-    };
-  }
 }
 
-// Bill amount fetcher
+// Scraper for bill amount
 async function fetchBillAmount(page, ukscno) {
-  try {
-    if (ukscno === 'Not Found' || !ukscno) return 'Not Found';
+    try {
+        if (!ukscno || ukscno === 'Not Found') return 'Not Found';
+        await page.goto('https://tgsouthernpower.org/getBillAmount', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForSelector('#ukscno', { timeout: 15000 }); // Increased timeout
+        await page.type('#ukscno', ukscno, { delay: 20 });
+        await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
+            page.click('button[type="submit"]')
+        ]);
+        await page.waitForSelector('table', { timeout: 10000 }).catch(() => null);
 
-    await page.goto('https://tgsouthernpower.org/getBillAmount', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForSelector('#ukscno', { timeout: 10000 });
-    await page.type('#ukscno', ukscno, { delay: 20 });
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
-      page.click('button[type="submit"]')
-    ]);
-
-    await page.waitForSelector('table', { timeout: 8000 }).catch(() => logger.warn(`Table not found for UKSCNO ${ukscno}`));
-
-    const billAmount = await page.evaluate(() => {
-      const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      const rows = Array.from(document.querySelectorAll('table tr'));
-      for (const row of rows) {
-        const cells = row.querySelectorAll('td, th');
-        if (cells.length > 1) {
-            for (let i = 0; i < cells.length - 1; i++) {
-                const labelText = norm(cells[i].textContent);
-                if (labelText.includes('current month bill') || labelText.includes('total amount payable')) {
-                    const amountText = cells[cells.length - 1].textContent.trim();
-                    if (amountText && amountText.match(/([0-9,]+\.?[0-9]*)/)) {
-                        return amountText;
+        return await page.evaluate(() => {
+            const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const rows = document.querySelectorAll('table tr');
+            for (const row of rows) {
+                const cells = row.querySelectorAll('td, th');
+                if (cells.length > 1) {
+                    for (let i = 0; i < cells.length - 1; i++) {
+                        if (norm(cells[i].textContent).includes('current month bill') || norm(cells[i].textContent).includes('total amount payable')) {
+                            const amountText = cells[cells.length - 1].textContent.trim();
+                            if (amountText && amountText.match(/([0-9,]+\.?[0-9]*)/)) {
+                                return amountText;
+                            }
+                        }
                     }
                 }
             }
-        }
-      }
-      return 'Not Found';
-    });
-    return billAmount || 'Not Found';
-  } catch (error) {
-    logger.error(`Error fetching bill for UKSCNO ${ukscno}: ${error.message}`);
-    return 'Not Found';
-  }
+            return 'Not Found';
+        }) || 'Not Found';
+    } catch (error) {
+        logger.error(`Fetch Bill Error for ${ukscno}: ${error.message}`);
+        return 'Not Found';
+    }
 }
 
-// Complete service processing
+// Orchestrates a single lookup
 async function processService(page, circleCode, serviceNumber) {
-  try {
     const serviceDetails = await fetchServiceDetails(page, circleCode, serviceNumber);
     let billAmount = 'Not Found';
     if (serviceDetails.status === 'Success') {
-      billAmount = await fetchBillAmount(page, serviceDetails.uniqueServiceNo);
+        billAmount = await fetchBillAmount(page, serviceDetails.uniqueServiceNo);
     }
     return { ...serviceDetails, billAmount, processedAt: new Date().toISOString() };
-  } catch (error) {
-    logger.error(`Error in processService for ${circleCode} ${serviceNumber}: ${error.message}`);
-    return {
-      serviceNo: `${circleCode} ${serviceNumber}`, uniqueServiceNo: 'Not Found', customerName: 'Not Found',
-      address: 'Not Found', ero: 'Not Found', mobile: 'Not Found', billAmount: 'Not Found',
-      status: 'Failed', processedAt: new Date().toISOString()
-    };
-  }
 }
 
-// Save data to Supabase
+// Saves data to the database
 async function saveToSupabase(data) {
   try {
     if (process.env.SAVE_ONLY_SUCCESS === 'true' && data.status !== 'Success') {
-      logger.debug(`Skipping save for failed scrape: ${data.serviceNo}`);
       return true;
     }
-
     const { error } = await supabase.from('tgspdcl_automation_data').insert([{
       service_no: data.serviceNo, unique_service_no: data.uniqueServiceNo,
-      customer_name: data.customerName, address: data.address,
-      ero: data.ero, mobile: data.mobile, bill_amount: data.billAmount,
-      fetch_status: data.status,
-      search_info: {
-        circle_code: data.serviceNo.split(' ')[0],
-        service_number: data.serviceNo.split(' ')[1],
-        processed_at: data.processedAt
-      },
-      status: 'COMPLETED'
+      customer_name: data.customerName, address: data.address, ero: data.ero,
+      mobile: data.mobile, bill_amount: data.billAmount, fetch_status: data.status,
+      status: 'COMPLETED', search_info: { processed_at: data.processedAt }
     }]);
-    if (error) {
-        logger.error(`Supabase insert error: ${error.message}`);
-        return false;
-    }
+    if (error) throw error;
     return true;
   } catch (error) {
-    logger.error(`Error saving to Supabase: ${error.message}`);
+    logger.error(`Supabase insert error: ${error.message}`);
     return false;
   }
 }
 
-// Get the next pending circle code
+// Gets the next available task
 async function getNextPendingTask() {
   try {
-    const { data, error } = await supabase
-      .from('circle_codes')
-      .select('*')
-      .eq('status', 'PENDING')
-      .order('id', { ascending: true })
-      .limit(1);
-
+    const { data, error } = await supabase.from('circle_codes').select('*').eq('status', 'PENDING').order('id', { ascending: true }).limit(1);
     if (error) throw error;
-    return data && data.length > 0 ? data[0] : null;
+    return data?.[0] || null;
   } catch (error) {
     logger.error(`Error fetching next pending task: ${error.message}`);
     return null;
   }
 }
 
-// Update circle code status
+// Updates the task status
 async function updateCircleCodeStatus(id, status) {
   try {
     const { error } = await supabase.from('circle_codes').update({ status }).eq('id', id);
@@ -241,118 +196,100 @@ async function updateCircleCodeStatus(id, status) {
   }
 }
 
-// Main processing function for a single circle code
+// **MODIFIED** Processes one full circle code, reusing the provided browser
 async function processCircleCode(circle, browser) {
   const { circle_code, digits_in_service_code, id } = circle;
-  logger.info(`Starting processing for circle code: ${circle_code} with ${digits_in_service_code} digits`);
+  logger.info(`Processing circle code: ${circle_code} with ${digits_in_service_code} digits`);
   
   try {
     await updateCircleCodeStatus(id, 'PROCESSING');
     
     const maxNumber = Math.pow(10, digits_in_service_code) - 1;
-    let startIndex = Number.parseInt(process.env.START_INDEX ?? '0', 10);
-    let endIndex = Number.parseInt(process.env.END_INDEX ?? String(maxNumber), 10);
-    startIndex = Math.max(0, startIndex);
-    endIndex = Math.min(endIndex, maxNumber);
-
-    logger.info(`Processing range: ${String(startIndex).padStart(digits_in_service_code, '0')} to ${String(endIndex).padStart(digits_in_service_code, '0')}`);
+    const startIndex = 0;
+    const endIndex = maxNumber;
+    logger.info(`Processing range: 00000 to ${'9'.repeat(digits_in_service_code)}`);
     
-    let processedCount = 0, successCount = 0, savedCount = 0;
-    const totalToProcess = Math.abs(endIndex - startIndex) + 1;
-    
+    let processedCount = 0, successCount = 0;
     for (let i = startIndex; i <= endIndex; i++) {
       const serviceNumber = i.toString().padStart(digits_in_service_code, '0');
       let page = null;
-
       try {
         page = await browser.newPage();
         await page.setDefaultNavigationTimeout(45000);
         await page.setViewport({ width: 1920, height: 1080 });
         await page.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)]);
-        
         await page.setRequestInterception(true);
         page.on('request', (req) => {
           ['image', 'stylesheet', 'font', 'media'].includes(req.resourceType()) ? req.abort() : req.continue();
         });
         
         const result = await processService(page, circle_code, serviceNumber);
-        const saved = await saveToSupabase(result);
-        
-        processedCount++;
-        if (result.status === 'Success') successCount++;
-        if (saved && result.status === 'Success') savedCount++;
-
-        if (processedCount % 10 === 0) {
-          logger.info(`Progress: ${processedCount}/${totalToProcess} (${successCount} found) for circle ${circle_code}`);
+        if(result.status === 'Success') {
+            await saveToSupabase(result);
+            successCount++;
         }
-        
-      } catch (error) {
-        logger.error(`Critical error in loop for ${circle_code} ${serviceNumber}: ${error.message}`);
         processedCount++;
+
+        if (processedCount % 20 === 0) {
+          logger.info(`Progress: ${processedCount}/${endIndex+1} (${successCount} found) for circle ${circle_code}`);
+        }
+      } catch (error) {
+        logger.error(`Critical error in loop for ${circle_code}-${serviceNumber}: ${error.message}`);
       } finally {
         if (page) await page.close();
-        const delay = 1000 + Math.floor(Math.random() * 1500);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1500));
       }
     }
-
-    logger.info(`✅ Completed circle ${circle_code}: ${processedCount} processed, ${successCount} found`);
+    logger.info(`✅ Completed circle ${circle_code}`);
     await updateCircleCodeStatus(id, 'COMPLETED');
   } catch (error) {
     logger.error(`Fatal error processing circle ${circle_code}: ${error.message}`);
     await updateCircleCodeStatus(id, 'FAILED');
-    throw error;
   }
 }
 
-// Main automation function with a continuous loop
+// **MODIFIED** Main automation function with a single browser instance
 async function runAutomation() {
-  if (isProcessing) {
-    logger.info('Automation cycle is already running. Skipping trigger.');
-    return;
-  }
-  isProcessing = true;
-  logger.info('Starting automation cycle...');
+    logger.info('Automation engine started. Monitoring for tasks...');
+    
+    const browser = await setupBrowser(); // Launch browser ONCE
 
-  const browser = await setupBrowser();
-  
-  try {
-    while (true) {
-      const nextTask = await getNextPendingTask();
-      
-      if (nextTask) {
-        logger.info(`Found pending task: Circle ${nextTask.circle_code}`);
-        await processCircleCode(nextTask, browser);
-      } else {
-        logger.info('No more pending tasks found. Automation will now idle.');
-        break; // Exit the while loop
-      }
+    try {
+        // This loop runs forever
+        while (true) {
+            if (isProcessing) {
+                await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
+                continue;
+            }
+
+            const nextTask = await getNextPendingTask();
+
+            if (nextTask) {
+                isProcessing = true;
+                logger.info(`New task found: Circle ${nextTask.circle_code}. Starting processing.`);
+                await processCircleCode(nextTask, browser); // Pass the existing browser
+                isProcessing = false;
+                logger.info(`Task for circle ${nextTask.circle_code} finished. Resuming monitoring.`);
+            } else {
+                logger.info('No pending tasks found. Waiting for 1 minute before checking again.');
+                await new Promise(resolve => setTimeout(resolve, 60000)); // 1 minute delay
+            }
+        }
+    } catch (error) {
+        logger.error(`A critical error occurred in the automation cycle: ${error.message}`);
+    } finally {
+        if (browser) await browser.close(); // Close the single browser on exit
+        logger.info('Automation engine shutting down.');
     }
-  } catch (error) {
-    logger.error(`A critical error occurred in the automation cycle: ${error.message}`);
-  } finally {
-    if (browser) await browser.close();
-    isProcessing = false;
-    logger.info('Automation cycle finished.');
-  }
 }
 
 // API Routes
 app.get('/', (req, res) => res.json({ message: 'Automation Backend', status: 'running', isProcessing }));
-app.post('/start', (req, res) => {
-  if (isProcessing) {
-    return res.status(409).json({ success: false, message: 'Automation is already in progress.' });
-  }
-  // Run in background and immediately respond
-  runAutomation();
-  res.json({ success: true, message: 'Automation cycle triggered.' });
-});
 app.get('/status', (req, res) => res.json({ isProcessing }));
 
 
-// Start server
+// Start server and initial automation run
 app.listen(process.env.PORT || 3000, () => {
   logger.info(`Server running on port ${process.env.PORT || 3000}`);
-  logger.info('Automation backend ready. Starting initial check...');
-  runAutomation();
+  runAutomation(); // Kick off the continuous monitoring loop
 });
