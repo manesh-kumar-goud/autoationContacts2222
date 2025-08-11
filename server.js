@@ -52,7 +52,7 @@ async function setupBrowser() {
       args: [
         '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
         '--disable-gpu', '--disable-infobars', '--window-size=1920,1080',
-        '--no-zygote', '--single-process' // Flags for stability in server environments
+        '--no-zygote', '--single-process'
       ]
     });
     logger.info('Browser setup completed');
@@ -99,47 +99,69 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
         }
         return serviceDetails;
     } catch (error) {
-        // Don't log timeout errors as huge stack traces, just the message
         logger.error(`Fetch Details Error for ${circleCode}-${serviceNumber}: ${error.message}`);
         return { serviceNo: `${circleCode} ${serviceNumber}`, status: 'Failed' };
     }
 }
 
-// Scraper for bill amount
+// Scraper for bill amount with retry logic
 async function fetchBillAmount(page, ukscno) {
-    try {
-        if (!ukscno || ukscno === 'Not Found') return 'Not Found';
-        await page.goto('https://tgsouthernpower.org/getBillAmount', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForSelector('#ukscno', { timeout: 15000 }); // Increased timeout
-        await page.type('#ukscno', ukscno, { delay: 20 });
-        await Promise.all([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
-            page.click('button[type="submit"]')
-        ]);
-        await page.waitForSelector('table', { timeout: 10000 }).catch(() => null);
+  if (!ukscno || ukscno === 'Not Found') {
+    return 'Not Found';
+  }
 
-        return await page.evaluate(() => {
-            const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-            const rows = document.querySelectorAll('table tr');
-            for (const row of rows) {
-                const cells = row.querySelectorAll('td, th');
-                if (cells.length > 1) {
-                    for (let i = 0; i < cells.length - 1; i++) {
-                        if (norm(cells[i].textContent).includes('current month bill') || norm(cells[i].textContent).includes('total amount payable')) {
-                            const amountText = cells[cells.length - 1].textContent.trim();
-                            if (amountText && amountText.match(/([0-9,]+\.?[0-9]*)/)) {
-                                return amountText;
-                            }
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await page.goto('https://tgsouthernpower.org/getBillAmount', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForSelector('#ukscno', { timeout: 20000 });
+      await page.type('#ukscno', ukscno, { delay: 20 });
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null),
+        page.click('button[type="submit"]')
+      ]);
+      await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(() => {});
+      await page.waitForSelector('table tr:nth-child(2)', { timeout: 10000 }).catch(() => {});
+
+      const billAmount = await page.evaluate(() => {
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const rows = document.querySelectorAll('table tr');
+        for (const row of rows) {
+            const cells = row.querySelectorAll('td, th');
+            if (cells.length > 1) {
+                for (let i = 0; i < cells.length - 1; i++) {
+                    const labelText = norm(cells[i].textContent);
+                    if (labelText.includes('current month bill') || labelText.includes('total amount payable')) {
+                        const amountText = cells[cells.length - 1].textContent.trim();
+                        if (amountText && amountText.match(/([0-9,]+\.?[0-9]*)/)) {
+                            return amountText;
                         }
                     }
                 }
             }
-            return 'Not Found';
-        }) || 'Not Found';
-    } catch (error) {
-        logger.error(`Fetch Bill Error for ${ukscno}: ${error.message}`);
+        }
         return 'Not Found';
+      });
+
+      if (billAmount && billAmount !== 'Not Found') {
+        return billAmount; // Success, exit retry loop
+      }
+      // If evaluate returns "Not Found", we might want to retry.
+      if (attempt < MAX_RETRIES) {
+          logger.warn(`Could not find bill amount for ${ukscno} on attempt ${attempt}. Retrying...`);
+          await new Promise(resolve => setTimeout(resolve, 1500)); // Wait before retrying
+      } else {
+          return 'Not Found'; // Return "Not Found" after all retries
+      }
+    } catch (error) {
+      logger.error(`Attempt ${attempt}/${MAX_RETRIES} failed for bill fetch ${ukscno}: ${error.message}`);
+      if (attempt === MAX_RETRIES) {
+        return 'Not Found'; // Return after the last retry fails
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
     }
+  }
+  return 'Not Found';
 }
 
 // Orchestrates a single lookup
@@ -196,7 +218,7 @@ async function updateCircleCodeStatus(id, status) {
   }
 }
 
-// **MODIFIED** Processes one full circle code, reusing the provided browser
+// Processes one full circle code, reusing the provided browser
 async function processCircleCode(circle, browser) {
   const { circle_code, digits_in_service_code, id } = circle;
   logger.info(`Processing circle code: ${circle_code} with ${digits_in_service_code} digits`);
@@ -248,7 +270,7 @@ async function processCircleCode(circle, browser) {
   }
 }
 
-// **MODIFIED** Main automation function with a single browser instance
+// Main automation function with a single browser instance
 async function runAutomation() {
     logger.info('Automation engine started. Monitoring for tasks...');
     
@@ -258,7 +280,7 @@ async function runAutomation() {
         // This loop runs forever
         while (true) {
             if (isProcessing) {
-                await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
+                await new Promise(resolve => setTimeout(resolve, 60000));
                 continue;
             }
 
