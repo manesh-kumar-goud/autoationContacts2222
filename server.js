@@ -104,7 +104,7 @@ async function fetchServiceDetails(page, circleCode, serviceNumber) {
     }
 }
 
-// Scraper for bill amount with retry logic
+// **FINAL, CORRECTED FUNCTION** - Scraper for bill amount with your working logic and retries
 async function fetchBillAmount(page, ukscno) {
   if (!ukscno || ukscno === 'Not Found') {
     return 'Not Found';
@@ -123,43 +123,60 @@ async function fetchBillAmount(page, ukscno) {
       await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(() => {});
       await page.waitForSelector('table tr:nth-child(2)', { timeout: 10000 }).catch(() => {});
 
+      // Using your superior, more flexible extraction logic
       const billAmount = await page.evaluate(() => {
-        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-        const rows = document.querySelectorAll('table tr');
-        for (const row of rows) {
-            const cells = row.querySelectorAll('td, th');
-            if (cells.length > 1) {
-                for (let i = 0; i < cells.length - 1; i++) {
-                    const labelText = norm(cells[i].textContent);
-                    if (labelText.includes('current month bill') || labelText.includes('total amount payable')) {
-                        const amountText = cells[cells.length - 1].textContent.trim();
-                        if (amountText && amountText.match(/([0-9,]+\.?[0-9]*)/)) {
-                            return amountText;
-                        }
-                    }
-                }
+          const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+          const parseAmountText = (t) => {
+            const m = norm(t).match(/(₹|rs\.?\s*)?\s*([0-9][0-9,]*\.?[0-9]*)/i);
+            return m ? m[0].trim() : null;
+          };
+          const extractFromCells = (cells) => {
+            for (let i = cells.length - 1; i >= 0; i--) {
+              const amt = parseAmountText(cells[i].textContent);
+              if (amt) return amt;
             }
-        }
-        return 'Not Found';
+            return null;
+          };
+          const findByLabel = (regex) => {
+            const rows = Array.from(document.querySelectorAll('table tr'));
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (regex.test(norm(row.textContent))) {
+                // Check current row, then next two rows for amount
+                for (let j = 0; j <= 2 && i + j < rows.length; j++) {
+                  let amt = extractFromCells(Array.from(rows[i + j].querySelectorAll('td')));
+                  if (amt) return amt;
+                }
+                break;
+              }
+            }
+            return null;
+          };
+
+          let amt = findByLabel(/current\s*month\s*bill/i) || findByLabel(/total\s*amount\s*payable/i);
+          if (amt) return amt;
+          
+          // Last resort: find any currency symbol on the page
+          const any = [...document.body.innerText.matchAll(/₹\s*[0-9][0-9,]*\.?[0-9]*/g)].map((m) => m[0].trim());
+          return any.length > 0 ? any[0] : 'Not Found';
       });
 
       if (billAmount && billAmount !== 'Not Found') {
-        return billAmount; // Success, exit retry loop
+        return billAmount; // Success! Exit the retry loop.
       }
-      // If evaluate returns "Not Found", we might want to retry.
-      if (attempt < MAX_RETRIES) {
-          logger.warn(`Could not find bill amount for ${ukscno} on attempt ${attempt}. Retrying...`);
-          await new Promise(resolve => setTimeout(resolve, 1500)); // Wait before retrying
-      } else {
-          return 'Not Found'; // Return "Not Found" after all retries
+      if(attempt === MAX_RETRIES){
+        return 'Not Found'; // All retries failed
       }
+      logger.warn(`Could not find bill for ${ukscno} on attempt ${attempt}. Retrying...`);
+
     } catch (error) {
       logger.error(`Attempt ${attempt}/${MAX_RETRIES} failed for bill fetch ${ukscno}: ${error.message}`);
       if (attempt === MAX_RETRIES) {
         return 'Not Found'; // Return after the last retry fails
       }
-      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
     }
+    // Wait before the next retry
+    await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
   }
   return 'Not Found';
 }
